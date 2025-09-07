@@ -7,7 +7,8 @@ pub mod enums;
 pub mod database;
 
 use std::fs;
-use sqlx::SqlitePool;
+use std::time::Duration;
+use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
 use commands::fetcher::{sync, sync_all};
 use commands::splashscreen::{close_splashscreen, open_main_window};
 use structs::single_instance_payload::SingleInstancePayload;
@@ -74,13 +75,113 @@ fn main() {
         .setup(|app| {
              block_on(async move {
                  let handle = app.handle();
+                 
+                 eprintln!("=== ALDUIN DATABASE SETUP DEBUG ===");
+                 eprintln!("Starting database initialization...");
 
-                 let app_dir = handle.path_resolver().app_data_dir().expect("failed to get app data dir");
-                 fs::create_dir_all(&app_dir).expect("failed to create app data dir");
-                 let sqlite_path = app_dir.join("alduin.db").to_string_lossy().to_string();
+                 // Use plugin's config directory to access same database file
+                 let app_dir = if let Some(native_dir) = handle.path_resolver().app_config_dir() {
+                     eprintln!("✅ Using Tauri app config directory: {:?}", native_dir);
+                     native_dir
+                 } else if let Ok(home) = std::env::var("HOME") {
+                     let fallback_dir = std::path::PathBuf::from(&home).join(".config/io.stouder.alduin");
+                     eprintln!("⚠️  Falling back to HOME/.config/io.stouder.alduin: {:?}", fallback_dir);
+                     fallback_dir
+                 } else {
+                     let emergency_dir = std::path::PathBuf::from("./data");
+                     eprintln!("🚨 Emergency fallback to ./data: {:?}", emergency_dir);
+                     emergency_dir
+                 };
 
-                 let db = SqlitePool::connect(sqlite_path.as_str()).await.expect("failed to connect to sqlite");
+                 // Debug: Log path information  
+                 eprintln!("Plugin config directory: {:?}", app_dir);
+                 eprintln!("Directory exists: {}", app_dir.exists());
+
+                 // Connect to existing plugin database
+                 let sqlite_path = app_dir.join("alduin.db");
+                 
+                 eprintln!("Plugin database path: {:?}", sqlite_path);
+                 eprintln!("Database file exists: {}", sqlite_path.exists());
+                 
+                 if sqlite_path.exists() {
+                     if let Ok(metadata) = fs::metadata(&sqlite_path) {
+                         eprintln!("Database file size: {} bytes", metadata.len());
+                         eprintln!("Database file readonly: {}", metadata.permissions().readonly());
+                     }
+                 } else {
+                     eprintln!("⚠️  Plugin database not yet created, will retry connection...");
+                 }
+
+                 // Create connection options without create_if_missing (plugin handles creation)
+                 let connect_options = SqliteConnectOptions::new()
+                     .filename(&sqlite_path);
+
+                 // Wait for plugin initialization and database creation
+                 eprintln!("Waiting for plugin initialization and database creation...");
+                 tokio::time::sleep(Duration::from_millis(1000)).await;
+                 
+                 // Verify plugin database exists before connecting
+                 if !sqlite_path.exists() {
+                     eprintln!("⚠️  Plugin database still not found, waiting longer...");
+                     tokio::time::sleep(Duration::from_millis(2000)).await;
+                     
+                     if !sqlite_path.exists() {
+                         eprintln!("❌ Plugin database not found after extended wait");
+                         eprintln!("❌ Expected location: {:?}", sqlite_path);
+                         panic!("Plugin database creation failed or path mismatch");
+                     }
+                 }
+
+                 // Connect to plugin database
+                 eprintln!("Connecting to plugin database...");
+                 let mut connection_attempts = 0;
+                 let max_attempts = 3;
+                 
+                 let db = loop {
+                     connection_attempts += 1;
+                     eprintln!("Plugin database connection attempt {}/{}", connection_attempts, max_attempts);
+                     
+                     match SqlitePool::connect_with(connect_options.clone()).await {
+                         Ok(pool) => {
+                             eprintln!("✅ Plugin database connection successful on attempt {}", connection_attempts);
+                             break pool;
+                         }
+                         Err(e) => {
+                             eprintln!("❌ SQLite connection failed on attempt {}: {}", connection_attempts, e);
+                             eprintln!("Connection options - filename: {:?}", sqlite_path);
+                             eprintln!("Database path: {:?}", sqlite_path);
+                             eprintln!("Directory exists: {}", app_dir.exists());
+                             eprintln!("Database file exists: {}", sqlite_path.exists());
+                             
+                             // Additional debugging for SQLite-specific errors
+                             match e {
+                                 sqlx::Error::Database(ref db_err) => {
+                                     eprintln!("Database error code: {:?}", db_err.code());
+                                     eprintln!("Database error message: {}", db_err.message());
+                                 }
+                                 _ => {
+                                     eprintln!("Non-database error: {:?}", e);
+                                 }
+                             }
+                             
+                             if connection_attempts >= max_attempts {
+                                 eprintln!("❌ All connection attempts failed. Final error: {}", e);
+                                 panic!("Failed to connect to SQLite after {} attempts: {}", max_attempts, e);
+                             }
+                             
+                             // Wait before retrying with exponential backoff
+                             let delay = Duration::from_millis(100 * connection_attempts as u64);
+                             eprintln!("Retrying in {}ms...", delay.as_millis());
+                             tokio::time::sleep(delay).await;
+                         }
+                     }
+                 };
+
+                 eprintln!("✅ Plugin database connection established!");
+                 eprintln!("Registering unified database with app state...");
                  app.manage(db);
+                 eprintln!("✅ Unified database registered with app state");
+                 eprintln!("=== UNIFIED DATABASE SETUP COMPLETE ===");
 
                  Ok(())
             })
