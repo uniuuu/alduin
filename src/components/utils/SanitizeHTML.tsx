@@ -58,7 +58,7 @@ export default function SanitizeHTML({ html, limit = 0 }: SanitizeHTMLProps) {
 
     return limit === 0
       ? treated
-      : `${treated.slice(0, limit).replaceAll('\n', ' ').trim()}...`;
+      : `${treated.slice(0, limit).trim()}...`;
   }, [html, limit]);
 
   return (

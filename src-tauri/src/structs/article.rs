@@ -21,9 +21,22 @@ impl From<Entry> for Article {
             None => String::from("No title found, please report this issue."),
         };
         let content = match entry.content {
-            Some(c) => c.body.unwrap(),
+            Some(c) => c.body.unwrap()
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('\n', "<br>\n")
+                .replace('\t', "&nbsp;&nbsp;&nbsp;&nbsp;"),
             None => match entry.summary {
-                Some(s) => s.content,
+                Some(s) => {
+                    // Convert plain text to HTML preserving formatting
+                    s.content
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;")
+                        .replace('\n', "<br>\n")
+                        .replace('\t', "&nbsp;&nbsp;&nbsp;&nbsp;")
+                },
                 None => String::from("No content found, please report this issue."),
             },
         };
